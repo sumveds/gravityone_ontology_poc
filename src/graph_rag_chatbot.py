@@ -8,14 +8,18 @@ from config.settings import settings
 import os
 import signal
 import sys
+import threading
+import time
 
-LABELS = ["Priority", "Objective", "KPI", "Risk", "Strategy", "Project", "BU", "Budget", "Output", "Benchmark"]
+LABELS = ["Organisation", "OrganisationGroup", "BusinessUnit", "Owner", "BusinessPlan", 
+          "StrategicObjective", "StrategicOutcome", "Objective", "KPI", "Risk", 
+          "Output", "Project", "Capability", "Budget"]
 EMBED_PROPERTY = "name"
 
 # ==== SETUP ====
 driver = GraphDatabase.driver(settings.NEO4J_URI, auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD))
 embedder = OpenAIEmbeddings(model="text-embedding-3-small", api_key=settings.OPENAI_API_KEY)
-llm = OpenAILLM(model_name="gpt-4o", model_params={"temperature": 0.0}, api_key=settings.OPENAI_API_KEY)
+llm = OpenAILLM(model_name="gpt-5", model_params={"temperature": 1}, api_key=settings.OPENAI_API_KEY)
 
 def reset_embeddings():
     """Remove all existing embeddings from nodes"""
@@ -114,6 +118,31 @@ def backfill_embeddings():
             except Exception as e:
                 print(f"    ❌ Error: {e}")
 
+class Spinner:
+    def __init__(self, message="Processing"):
+        self.message = message
+        self.spinner_chars = "|/-\\"
+        self.idx = 0
+        self.stop_spinner = False
+        self.spinner_thread = None
+
+    def spin(self):
+        while not self.stop_spinner:
+            print(f"\r{self.message} {self.spinner_chars[self.idx % len(self.spinner_chars)]}", end="", flush=True)
+            self.idx += 1
+            time.sleep(0.1)
+
+    def start(self):
+        self.stop_spinner = False
+        self.spinner_thread = threading.Thread(target=self.spin)
+        self.spinner_thread.start()
+
+    def stop(self):
+        self.stop_spinner = True
+        if self.spinner_thread:
+            self.spinner_thread.join()
+        print("\r" + " " * (len(self.message) + 2) + "\r", end="", flush=True)
+
 def signal_handler(sig, frame):
     print("\n\nGracefully shutting down...")
     driver.close()
@@ -131,11 +160,11 @@ def start_chatbot():
         
         if not indexes:
             print("❌ No embedding index found. Creating a simple one...")
-            # Try to create a simple vector index for Priority nodes
+            # Try to create a simple vector index for Organisation nodes
             try:
                 session.run("""
                     CREATE VECTOR INDEX simple_embedding_index IF NOT EXISTS
-                    FOR (n:Priority) ON (n.embedding)
+                    FOR (n:Organisation) ON (n.embedding)
                     OPTIONS {
                         indexConfig: {
                             `vector.dimensions`: 1536,
@@ -156,8 +185,15 @@ def start_chatbot():
     retrieval_query = """
     MATCH (n)-[r]-(m)
     WHERE n.embedding IS NOT NULL
-    RETURN n.name + ': ' + coalesce(n.description, '') AS text,
-           type(r) + ' -> ' + m.name AS relationships,
+    WITH n, r, m, score
+    RETURN n.name + CASE 
+             WHEN n.description IS NOT NULL THEN ': ' + n.description 
+             WHEN n.type IS NOT NULL THEN ' (Type: ' + n.type + ')'
+             WHEN n.domain IS NOT NULL THEN ' (Domain: ' + n.domain + ')'
+             WHEN n.status IS NOT NULL THEN ' (Status: ' + n.status + ')'
+             ELSE '' 
+           END AS text,
+           type(r) + ' -> ' + coalesce(m.name, m.org_id, m.bu_id, m.project_id, '') AS relationships,
            labels(n)[0] AS node_type,
            score
     ORDER BY score DESC
@@ -186,9 +222,14 @@ def start_chatbot():
         if query.strip().lower() in ("exit", "quit"):
             break
         try:
+            spinner = Spinner("🤔 Thinking")
+            spinner.start()
             response = rag.search(query_text=query, retriever_config={"top_k": 10})
+            spinner.stop()
             print("\n---\nAnswer:\n", response.answer)
         except Exception as e:
+            if 'spinner' in locals():
+                spinner.stop()
             print("Error answering your question:", e)
 
 if __name__ == "__main__":
