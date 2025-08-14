@@ -2,7 +2,7 @@ annotated-types==0.7.0
 anyio==4.9.0
 certifi==2025.7.14
 charset-normalizer==3.4.2
-click==8.2.1
+click>=8.0.0
 distro==1.9.0
 faiss-cpu==1.7.4
 filelock==3.18.0
@@ -26,7 +26,7 @@ networkx==3.5
 nltk==3.9.1
 numpy==2.3.1
 openai==1.35.3
-packaging==25.0
+packaging>=20.9,<25
 pillow==11.3.0
 pydantic==2.8.2
 pydantic_core==2.20.1
