@@ -131,6 +131,19 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
+# Streamlit
+.streamlit/
+!.streamlit/secrets.toml.example
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
 # Project specific
 gravityone_ontology.log
 *.log

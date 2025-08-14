@@ -3,12 +3,14 @@ from neo4j_graphrag.embeddings import OpenAIEmbeddings
 from neo4j_graphrag.llm import OpenAILLM
 from neo4j_graphrag.retrievers import VectorCypherRetriever
 from neo4j_graphrag.generation import GraphRAG
+from neo4j_graphrag.generation.prompts import RagTemplate
 from config.settings import settings
 
 import signal
 import sys
 import threading
 import time
+import streamlit as st
 
 # =========================
 # CONFIG
@@ -59,7 +61,6 @@ embedder = OpenAIEmbeddings(model=EMBED_MODEL, api_key=settings.OPENAI_API_KEY)
 # Lower temperature for deterministic numeric reasoning
 llm = OpenAILLM(
     model_name="gpt-5-mini",
-    system_message=GRAPH_ANALYST_INSTRUCTION,
     model_params={"temperature": 1},
     api_key=settings.OPENAI_API_KEY
 )
@@ -334,9 +335,15 @@ retriever = VectorCypherRetriever(
     retrieval_query=RETRIEVAL_QUERY
 )
 
+# Create custom RAG template with system instructions
+custom_template = RagTemplate(
+    system_instructions=GRAPH_ANALYST_INSTRUCTION
+)
+
 rag = GraphRAG(
     retriever=retriever,
-    llm=llm
+    llm=llm,
+    prompt_template=custom_template
 )
 
 # =========================
@@ -437,14 +444,190 @@ def start_chatbot():
             print("Error:", e)
 
 # =========================
+# STREAMLIT INTERFACE
+# =========================
+def initialize_rag():
+    """Initialize RAG system components (called once per session)"""
+    if 'rag_initialized' not in st.session_state:
+        with st.spinner("🔄 Initializing Graph RAG system..."):
+            # Ensure index exists
+            with driver.session() as session:
+                idx_names = [rec["name"] for rec in session.run("SHOW INDEXES")]
+                if INDEX_NAME not in idx_names:
+                    st.info("Creating embedding index...")
+                    setup_vector_index()
+                
+            tag_searchable_nodes()
+            setup_vector_index()
+            backfill_embeddings(batch_size=1000)
+            
+        st.session_state.rag_initialized = True
+        st.success("✅ Graph RAG system ready!")
+
+def run_streamlit_app():
+    st.set_page_config(
+        page_title="Enterprise Strategy Platform Chatbot",
+        page_icon="🧠",
+        layout="wide"
+    )
+    
+    st.title("🧠 Enterprise Strategy Platform Chatbot")
+    st.markdown("Ask questions about your organization's strategy, KPIs, risks, and business units.")
+    
+    
+    # Initialize RAG system
+    initialize_rag()
+    
+    # Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    
+    # Display chat history
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+    
+    
+    # Chat input
+    if prompt := st.chat_input("Ask a business question..."):
+        # Add user message to chat history
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        # Generate assistant response
+        with st.chat_message("assistant"):
+            with st.spinner("🤔 Analyzing..."):
+                try:
+                    # Fast-path: deterministic Cypher for BU health
+                    if looks_like_bu_health_question(prompt):
+                        response_text = answer_bu_health_direct()
+                    else:
+                        # Use RAG system
+                        try:
+                            response = rag.search(query_text=prompt, retriever_config={"top_k": 100})
+                            response_text = response.answer
+                        except Exception:
+                            # Simple one-time retry for transient connection hiccups
+                            time.sleep(0.8)
+                            response = rag.search(query_text=prompt, retriever_config={"top_k": 100})
+                            response_text = response.answer
+                    
+                    st.markdown(response_text)
+                    
+                    # Add assistant response to chat history
+                    st.session_state.messages.append({"role": "assistant", "content": response_text})
+                    
+                except Exception as e:
+                    error_msg = f"Error: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
+    
+    # Handle example question processing
+    if hasattr(st.session_state, 'process_question') and st.session_state.process_question:
+        question = st.session_state.process_question
+        st.session_state.process_question = None  # Clear the flag
+        
+        # Generate assistant response for the example question
+        with st.chat_message("assistant"):
+            with st.spinner("🤔 Analyzing..."):
+                try:
+                    # Fast-path: deterministic Cypher for BU health
+                    if looks_like_bu_health_question(question):
+                        response_text = answer_bu_health_direct()
+                    else:
+                        # Use RAG system
+                        try:
+                            response = rag.search(query_text=question, retriever_config={"top_k": 100})
+                            response_text = response.answer
+                        except Exception:
+                            # Simple one-time retry for transient connection hiccups
+                            time.sleep(0.8)
+                            response = rag.search(query_text=question, retriever_config={"top_k": 100})
+                            response_text = response.answer
+                    
+                    st.markdown(response_text)
+                    
+                    # Add assistant response to chat history
+                    st.session_state.messages.append({"role": "assistant", "content": response_text})
+                    
+                except Exception as e:
+                    error_msg = f"Error: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
+    
+    # Sidebar with information
+    with st.sidebar:
+        st.header("ℹ️ About")
+        st.markdown("""
+        This chatbot can answer all your questions about your:
+        - 🏢 Organizations & Business Units
+        - 🎯 Strategic Objectives & KPIs
+        - ⚠️ Risks & Risk Management
+        - 💰 Budgets & Projects
+        - 🔧 Capabilities & Outputs
+        """)
+        
+        st.header("💡 Example Questions")
+        example_questions = [
+            "What are our active strategic outcomes and their linked objectives?",
+            "Which projects deliver Objective \"Grow online revenue 20%\" and how are they performing?",
+            "Which outputs are underperforming on adoption or quality?",
+            "Which BUs and capabilities are strong vs. weak?",
+            "Where are the key risks, and which capabilities do they limit?",
+            "Which KPIs are underperforming, and why?",
+            "How are we tracking against KPI \"Store Operations Health Score\"?",
+            "Show the value chain to deliver Objective \"Grow online revenue 20%\"."
+        ]
+        
+        for question in example_questions:
+            if st.button(question, key=f"example_{hash(question)}"):
+                st.session_state.messages.append({"role": "user", "content": question})
+                st.session_state.process_question = question
+                st.rerun()
+        
+        if st.button("🗑️ Clear Chat History"):
+            st.session_state.messages = []
+            st.rerun()
+
+# =========================
 # MAIN
 # =========================
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == '--reset':
-        reset_embeddings()
-
-    tag_searchable_nodes()
-    setup_vector_index()
-    backfill_embeddings(batch_size=1000)
-    start_chatbot()
-    driver.close()
+# Check if running in Streamlit environment
+try:
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+    if get_script_run_ctx() is not None:
+        # Running in Streamlit - only run the Streamlit app
+        run_streamlit_app()
+    else:
+        # Not running in Streamlit - check if this is direct execution
+        if __name__ == "__main__":
+            # CLI mode
+            if len(sys.argv) > 1 and sys.argv[1] == '--reset':
+                reset_embeddings()
+            elif len(sys.argv) > 1 and sys.argv[1] == '--streamlit':
+                # Run Streamlit app programmatically
+                import subprocess
+                subprocess.run(["streamlit", "run", __file__])
+            else:
+                tag_searchable_nodes()
+                setup_vector_index()
+                backfill_embeddings(batch_size=1000)
+                start_chatbot()
+                driver.close()
+except ImportError:
+    # Streamlit not available - run CLI mode if main
+    if __name__ == "__main__":
+        # CLI mode
+        if len(sys.argv) > 1 and sys.argv[1] == '--reset':
+            reset_embeddings()
+        elif len(sys.argv) > 1 and sys.argv[1] == '--streamlit':
+            # Run Streamlit app programmatically
+            import subprocess
+            subprocess.run(["streamlit", "run", __file__])
+        else:
+            tag_searchable_nodes()
+            setup_vector_index()
+            backfill_embeddings(batch_size=1000)
+            start_chatbot()
+            driver.close()
